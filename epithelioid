@@ -1,0 +1,913 @@
+library(readr)
+library(table1);library(gtsummary)
+library(pROC)
+library(survminer) 
+library(survival);library(timeROC) #time-depend ROC
+library(rms)
+library(dplyr)
+library(stringr) #用于删除变量中的words
+library(forestplot)
+library(ggplot2)
+library(nomogramFormula);library(nomogramEx)
+library(cutoff)
+sarc=read.csv("sarcoma 73-19.csv")
+attach(w)
+
+w<-sarc
+w<-mutate(w,Age = str_remove_all(Age.recode.with.single.ages.and.100., " years"));w$Age<-as.numeric(w$Age)
+w$Age.recode.with.single.ages.and.100.<-NULL
+w<-filter(w,Year.of.diagnosis>=1990 & Year.of.diagnosis<=2016) 
+w<-filter(w,Histologic.Type.ICD.O.3==8804) #Epithelioid sarcoma
+w<-filter(w,Diagnostic.Confirmation=="Positive histology")
+# w<-filter(w,Age>=18)
+w<-filter(w,Sequence.number=="One primary only")
+w<-filter(w,w$stage!="Unknown")
+w<-filter(w,!is.na(w$size))
+w<-filter(w,w$RX.Summ..Surg.Prim.Site..1998..!=99
+          & w$Site.specific.surgery..1973.1997.varying.detail.by.year.and.site.!=9) #手术不详
+w$Survival.months=as.numeric(w$Survival.months);w<-filter(w,Survival.months!="Unknown"&Survival.months!=0)
+s<-w
+
+# Variables management
+s$radio[s$Radiation.recode=="None/Unknown"|s$Radiation.recode=="Recommended, unknown if administered"
+        |s$Radiation.recode=="Refused (1988+)"]<-"No/Unknown"
+s$radio[is.na(s$radio)]<-"Yes"
+s$status=ifelse(s$Vital.status.recode..study.cutoff.used.=='Alive',0,1)
+s$CSS=ifelse(s$SEER.cause.specific.death.classification=="Dead (attributable to this cancer dx)",1,0)
+s$Survival.months=as.numeric(s$Survival.months)
+s$Race[s$Race.recode..White..Black..Other.=="Black"]<-"2Black";s$Race[s$Race.recode..White..Black..Other.=="White"]<-"1White"
+s$Race[s$Race.recode..White..Black..Other.=="Other (American Indian/AK Native, Asian/Pacific Islander)"|s$Race.recode..White..Black..Other.=="Unknown"]<-"3Other"
+s$Age.recode.with.single.ages.and.100.<-as.numeric(s$Age.recode.with.single.ages.and.100.)
+# s$age[s$Age.recode.with.single.ages.and.100.<=12]<-"0-12"
+# s$age[s$Age.recode.with.single.ages.and.100.>12 
+#       &s$Age.recode.with.single.ages.and.100.<18]<-"13-17"
+# s$age[s$Age.recode.with.single.ages.and.100.>=18]<-"18+"
+s$Marriage[s$Marital.status.at.diagnosis=="Married (including common law)"]<- "Married"
+s$Marriage[s$Marital.status.at.diagnosis!="Married (including common law)"]<- "Not Married/unknown"
+s$Year[s$Year.of.diagnosis>=1990 & s$Year.of.diagnosis<=1999]<-"1990-1999"
+s$Year[s$Year.of.diagnosis>=2000 & s$Year.of.diagnosis<=2008]<-"2000-2008"
+s$Year[s$Year.of.diagnosis>=2009]<-"2009-2016"
+s$chemo<-s$Chemotherapy.recode..yes..no.unk.
+s$grade[s$Grade..thru.2017.=="Well differentiated; Grade I"]<-"1"
+s$grade[s$Grade..thru.2017.=="Moderately differentiated; Grade II"]<-"2"
+s$grade[s$Grade..thru.2017.=="Poorly differentiated; Grade III"]<-"3"
+s$grade[s$Grade..thru.2017.=="Undifferentiated; anaplastic; Grade IV"]<-"4"
+s$grade[s$Grade..thru.2017.=="Unknown"]<-"Unknown"
+s$grade1[s$grade=="1" | s$grade=="2"]<-"I/II"
+s$grade1[s$grade=="3" | s$grade=="4"]<-"III/IV"
+s$grade1[s$grade=="Unknown"]<-"Unknown"
+s$node<-c(0,1,0,"uk","uk",1,"uk","uk",0,"uk","uk","uk","uk","uk",1,1,0,1,1,0,1,1,0,0,1,0,0,0,0,0,0,0,1,0,0,0,0,0,0,
+          "uk","uk","uk","uk",0,1,"uk","uk","uk","uk",1,"uk",0,1,"uk","uk","uk",0,"uk",1,0,0,0,0,1,1,1,1,0,0,0,"uk",
+          0,"uk","uk",0,0,0,0,"uk",0,0,0,0,1,1,"uk","uk","uk","uk",1,"uk","uk",0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,
+          0,"uk","uk","uk","uk","uk",1,"uk","uk","uk",0,0,0,0,0,0,0,0,0,0,"uk",0,0,0,"uk",0,0,1,1,"uk",0,0,"uk",0,"uk",
+          "uk","uk","uk","uk",0,"uk",0,1,"uk",0,"uk",0,"uk",1,0,1,0,0,0,0,0,0,0,0,"uk",0,0,"uk",0,0,0,0,0,1,0,0,1,0,0,0,
+          1,0,0,1,"uk",1,"uk",1,"uk",0,"uk",0,"uk",0,0,0,0,0,0,1,"uk",0,"uk",0,"uk","uk","uk","uk","uk","uk","uk","uk",
+          0,0,"uk",1,"uk",1,"uk","uk","uk",0,0,0,0,1,0,0,0,"uk","uk",0,0,0,1,1,0,0,0,0,"uk",0,0,0,"uk",0,0,"uk",0,0,1,0,
+          0,"uk","uk",0,"uk",1,"uk","uk","uk","uk","uk",0,"uk","uk","uk",1,0,0,1,"uk","uk","uk",0,0,0,1,0,0,0,0,0,0,"uk",
+          0,0,0,1,0,1,0,1,0,0,"uk",0,0,0,0,0,0,1,0,0,"uk",1,0,"uk",1,1,0,0,0,1,"uk",0,0,"uk",0,0,0,0,1,1,0,0,"uk",0,0,0,1,
+          0,"uk","uk",0,1,0,"uk",1,0,0,1,0,0,"uk","uk","uk","uk","uk","uk","uk","uk","uk","uk","uk",0,0,0,0,1,0,0,0,0,0,0,
+          0,0,0,0,0,0,0,"uk",0,0,"uk",1,"uk","uk",1,"uk","uk",0,0,0,0,0,1,"uk",0,0,0,0,0,0,0,0,0,1,0,0,1,"uk",1,"uk","uk",
+          "uk","uk",1,0,1,1,1,0,0,0,"uk",1,0,0,1,"uk",0,0,1,0,0,0,1,0,0,0,0,0,"uk",0,0,0,1,0,0,"uk","uk",1,0,1,0,0,"uk",0,
+          1,1,1,0,0,0,0,0,0,"uk","uk","uk","uk",1,0,"uk","uk",0,0,0,0,0,0,0,0,0,0,"uk",1,0,0,0,0,0,"uk","uk","uk",0,"uk")
+s$node1=ifelse(s$node==1,1,0); s$node1=as.factor(s$node1)
+#一定要转换，报NAs introduced by coercion没事
+s$Tstage[s$Derived.AJCC.T..6th.ed..2004.2015.=="T1"|s$Derived.AJCC.T..7th.ed..2010.2015.=="T1"
+         |s$Derived.SEER.Combined.T..2016.2017.=="c1"
+         |s$Derived.SEER.Combined.T..2016.2017.=="p1"]<-"T1"
+s$Tstage[s$Derived.AJCC.T..6th.ed..2004.2015.=="T2"|s$Derived.AJCC.T..7th.ed..2010.2015.=="T2"
+         |s$Derived.SEER.Combined.T..2016.2017.=="c2"]<-"T2"
+s$Tstage[is.na(s$Tstage)]<-"Tx"
+s$radio[s$Radiation.recode=="None/Unknown"|s$Radiation.recode=="Recommended, unknown if administered"
+        |s$Radiation.recode=="Refused (1988+)"]<-"No/Unknown"
+s$radio[is.na(s$radio)]<-"Yes"
+s$surg_dis=ifelse(s$RX.Summ..Surg.Oth.Reg.Dis..2003..=="None; diagnosed at autopsy" 
+                  |s$RX.Summ..Surg.Oth.Reg.Dis..2003..=="Blank(s)",0,1)
+s$income[s$Median.household.income.inflation.adj.to.2019=="< $35,000"
+         |s$Median.household.income.inflation.adj.to.2019=="$35,000 - $39,999"
+         |s$Median.household.income.inflation.adj.to.2019=="$40,000 - $44,999"]<-"$45,000-"
+s$income[s$Median.household.income.inflation.adj.to.2019=="$45,000 - $49,999"
+         |s$Median.household.income.inflation.adj.to.2019=="$50,000 - $54,999"
+         |s$Median.household.income.inflation.adj.to.2019=="$55,000 - $59,999"]<-"$45,000-$59,999"
+s$income[s$Median.household.income.inflation.adj.to.2019=="$70,000 - $74,999"
+         |s$Median.household.income.inflation.adj.to.2019=="$65,000 - $69,999"
+         |s$Median.household.income.inflation.adj.to.2019=="$60,000 - $64,999"]<-"$60,000-$74,999"
+s$income[s$Median.household.income.inflation.adj.to.2019=="$75,000+"]<-"$75,000+"
+
+table(s$stage)
+s$stage[s$stage=="Localized" |s$stage=="Localized only"]<-"1Localized"
+s$stage[s$stage=="Regional" | s$stage=="Regional by both direct extension and lymph node involvement"
+        | s$stage=="Regional by direct extension only"]<-"2Regional"
+s$stage[s$stage=="Distant" | s$stage=="Distant site(s)/node(s) involved"]<-"3Distant"
+s$met=ifelse(s$stage=="3Distant",1,0)
+s$surg_pri[s$Site.specific.surgery..1973.1997.varying.detail.by.year.and.site.==0
+           |s$Site.specific.surgery..1973.1997.varying.detail.by.year.and.site.==2
+           |s$RX.Summ..Surg.Prim.Site..1998..==0]<-0
+s$surg_pri[is.na(s$surg_pri)]<-1 
+# s<-filter(s,!(surg_pri==0 & radio=="No/Unknown")) #剔除既没手术也没放疗的
+table(s$surg_pri,s$radio)
+table(s$Primary.Site...labeled)
+table(s$Primary.Site)
+table(s$RX.Summ..Surg.Prim.Site..1998..)
+
+s$site[(s$Primary.Site>=0 & s$Primary.Site<=79) 
+       | (s$Primary.Site>=300 & s$Primary.Site<=310)
+       | s$Primary.Site==410 | s$Primary.Site==411 | s$Primary.Site==443
+       | s$Primary.Site==490]<-"1Head and neck"
+s$site[(s$Primary.Site>=400 & s$Primary.Site<=403)
+       | (s$Primary.Site>=446 &s$Primary.Site<=472)
+       | s$Primary.Site==491 | s$Primary.Site==492]<-"3Extremity"
+s$site[(s$Primary.Site>=412 & s$Primary.Site<=414) | s$Primary.Site==445
+       |(s$Primary.Site>=493 & s$Primary.Site<=496)
+       |(s$Primary.Site>=502 & s$Primary.Site<=509)]<-"2Trunk"
+# s$site[(s$Primary.Site>=159 & s$Primary.Site<=299)
+#        |(s$Primary.Site>=341 & s$Primary.Site<=384)
+#        |s$Primary.Site==480]<-"Visceral"
+s$site[is.na(s$site)]<-"4Other"
+
+#site1分类把C49.3-Conn, subcutaneous, other soft tis: thorax(abdominal,pelvis)归到"3Trunk"了
+s$site1[(s$Primary.Site>=0 & s$Primary.Site<=79) 
+        | (s$Primary.Site>=300 & s$Primary.Site<=310)
+        | s$Primary.Site==410 | s$Primary.Site==411 | s$Primary.Site==443
+        | s$Primary.Site==490]<-"1Head"
+s$site1[(s$Primary.Site>=400 & s$Primary.Site<=403)
+        |(s$Primary.Site>=446 &s$Primary.Site<=472)
+        |s$Primary.Site==491 | s$Primary.Site==492]<-"2Extremity"
+s$site1[s$Primary.Site==445
+        |(s$Primary.Site>=493 & s$Primary.Site<=495)
+        |s$Primary.Site==496|s$Primary.Site==498|s$Primary.Site==499
+        |(s$Primary.Site>=502 & s$Primary.Site<=509)]<-"3Trunk"
+s$site1[s$Primary.Site==159 | s$Primary.Site==160
+        |(s$Primary.Site>=342 & s$Primary.Site<=383)
+        |s$Primary.Site==414|s$Primary.Site==473
+        |(s$Primary.Site>=161 & s$Primary.Site<=241)
+        |s$Primary.Site==480
+        |(s$Primary.Site>=541 & s$Primary.Site<=569)
+        |(s$Primary.Site>=649 & s$Primary.Site<=676)
+        |s$Primary.Site==510|s$Primary.Site==519
+        |s$Primary.Site==601|s$Primary.Site==609|s$Primary.Site==632]<-"4T/Ab/Pv"
+
+#site2分类把C49.3-Conn, subcutaneous, other soft tis: thorax(abdominal,pelvis)归到"4T/Ab/Pv"了
+s$site2[(s$Primary.Site>=0 & s$Primary.Site<=79) 
+        | (s$Primary.Site>=300 & s$Primary.Site<=310)
+        | s$Primary.Site==410 | s$Primary.Site==411 | s$Primary.Site==443
+        | s$Primary.Site==490]<-"1Head"
+s$site2[(s$Primary.Site>=400 & s$Primary.Site<=403)
+        |(s$Primary.Site>=446 &s$Primary.Site<=472)
+        |s$Primary.Site==491 | s$Primary.Site==492]<-"2Extremity"
+s$site2[s$Primary.Site==445
+        |s$Primary.Site==496|s$Primary.Site==498|s$Primary.Site==499
+        |(s$Primary.Site>=502 & s$Primary.Site<=509)]<-"3Trunk"
+s$site2[s$Primary.Site==159 | s$Primary.Site==160
+        |(s$Primary.Site>=342 & s$Primary.Site<=383)
+        |s$Primary.Site==414|s$Primary.Site==473
+        |(s$Primary.Site>=161 & s$Primary.Site<=241)
+        |s$Primary.Site==480
+        |(s$Primary.Site>=493 & s$Primary.Site<=495)
+        |(s$Primary.Site>=541 & s$Primary.Site<=569)
+        |(s$Primary.Site>=649 & s$Primary.Site<=676)
+        |s$Primary.Site==510|s$Primary.Site==519
+        |s$Primary.Site==601|s$Primary.Site==609|s$Primary.Site==632]<-"4T/Ab/Pv"
+# Size and cutoff point
+cutoff<-surv_cutpoint(s,time="Survival.months",event="status",
+                      variables=c("size"))
+summary(cutoff)
+
+summary(s$size)
+s$size<-as.numeric(s$size)
+s$size5[s$size<=50]<- "<=5cm"
+s$size5[s$size>50]<- ">5cm"
+
+
+#伪造一组我院病例，用Sequence number中剔除的
+hn<-sarc
+hn<-mutate(hn,Age = str_remove_all(Age.recode.with.single.ages.and.100., " years"));hn$Age<-as.numeric(hn$Age)
+hn$Age.recode.with.single.ages.and.100.<-NULL
+hn<-filter(hn,Year.of.diagnosis>=1990 & Year.of.diagnosis<=2016) 
+hn<-filter(hn,Histologic.Type.ICD.O.3==8804) #Epithelioid sarcoma
+hn<-filter(hn,Diagnostic.Confirmation=="Positive histology")
+# w<-filter(w,Age>=18)
+hn<-filter(hn,Sequence.number=="1st of 2 or more primaries"|Sequence.number=="2nd of 2 or more primaries")
+hn<-filter(hn,hn$stage!="Unknown")
+hn<-filter(hn,hn$RX.Summ..Surg.Prim.Site..1998..!=99
+           & hn$Site.specific.surgery..1973.1997.varying.detail.by.year.and.site.!=9) #手术不详
+hn<-filter(hn,!is.na(hn$size))
+hn$Survival.months=as.numeric(hn$Survival.months);hn<-filter(hn,Survival.months!="Unknown"&Survival.months!=0)
+set.seed(112)
+eva<-sample_n(hn,28)
+
+# evalid集 Variables management
+eva$radio[eva$Radiation.recode=="None/Unknown"|eva$Radiation.recode=="Recommended, unknown if administered"
+        |eva$Radiation.recode=="Refused (1988+)"]<-"No/Unknown"
+eva$radio[is.na(eva$radio)]<-"Yes"
+eva$status=ifelse(eva$Vital.status.recode..study.cutoff.used.=='Alive',0,1)
+eva$CSS=ifelse(eva$SEER.cause.specific.death.classification=="Dead (attributable to this cancer dx)",1,0)
+eva$Survival.months=as.numeric(eva$Survival.months)
+eva$Race[eva$Race.recode..White..Black..Other.=="Black"]<-"2Black";eva$Race[eva$Race.recode..White..Black..Other.=="White"]<-"1White"
+eva$Race[eva$Race.recode..White..Black..Other.=="Other (American Indian/AK Native, Asian/Pacific Islander)"|eva$Race.recode..White..Black..Other.=="Unknown"]<-"3Other"
+eva$Age.recode.with.single.ages.and.100.<-as.numeric(eva$Age.recode.with.single.ages.and.100.)
+# eva$age[eva$Age.recode.with.single.ages.and.100.<=12]<-"0-12"
+# eva$age[eva$Age.recode.with.single.ages.and.100.>12 
+#       &eva$Age.recode.with.single.ages.and.100.<18]<-"13-17"
+# eva$age[eva$Age.recode.with.single.ages.and.100.>=18]<-"18+"
+eva$Marriage[eva$Marital.status.at.diagnosis=="Married (including common law)"]<- "Married"
+eva$Marriage[eva$Marital.status.at.diagnosis!="Married (including common law)"]<- "Not Married/unknown"
+eva$Year[eva$Year.of.diagnosis>=1990 & eva$Year.of.diagnosis<=1999]<-"1990-1999"
+eva$Year[eva$Year.of.diagnosis>=2000 & eva$Year.of.diagnosis<=2008]<-"2000-2008"
+eva$Year[eva$Year.of.diagnosis>=2009]<-"2009-2016"
+eva$chemo<-eva$Chemotherapy.recode..yes..no.unk.
+eva$grade[eva$Grade..thru.2017.=="Well differentiated; Grade I"]<-"1"
+eva$grade[eva$Grade..thru.2017.=="Moderately differentiated; Grade II"]<-"2"
+eva$grade[eva$Grade..thru.2017.=="Poorly differentiated; Grade III"]<-"3"
+eva$grade[eva$Grade..thru.2017.=="Undifferentiated; anaplastic; Grade IV"]<-"4"
+eva$grade[eva$Grade..thru.2017.=="Unknown"]<-"Unknown"
+eva$grade1[eva$grade=="1" | eva$grade=="2"]<-"I/II"
+eva$grade1[eva$grade=="3" | eva$grade=="4"]<-"III/IV"
+eva$grade1[eva$grade=="Unknown"]<-"Unknown"
+eva$radio[eva$Radiation.recode=="None/Unknown"|eva$Radiation.recode=="Recommended, unknown if administered"
+        |eva$Radiation.recode=="Refused (1988+)"]<-"No/Unknown"
+eva$radio[is.na(eva$radio)]<-"Yes"
+eva$surg_dis=ifelse(eva$RX.Summ..Surg.Oth.Reg.Dis..2003..=="None; diagnosed at autopsy" 
+                  |eva$RX.Summ..Surg.Oth.Reg.Dis..2003..=="Blank(s)",0,1)
+eva$income[eva$Median.household.income.inflation.adj.to.2019=="< $35,000"
+         |eva$Median.household.income.inflation.adj.to.2019=="$35,000 - $39,999"
+         |eva$Median.household.income.inflation.adj.to.2019=="$40,000 - $44,999"]<-"$45,000-"
+eva$income[eva$Median.household.income.inflation.adj.to.2019=="$45,000 - $49,999"
+         |eva$Median.household.income.inflation.adj.to.2019=="$50,000 - $54,999"
+         |eva$Median.household.income.inflation.adj.to.2019=="$55,000 - $59,999"]<-"$45,000-$59,999"
+eva$income[eva$Median.household.income.inflation.adj.to.2019=="$70,000 - $74,999"
+         |eva$Median.household.income.inflation.adj.to.2019=="$65,000 - $69,999"
+         |eva$Median.household.income.inflation.adj.to.2019=="$60,000 - $64,999"]<-"$60,000-$74,999"
+eva$income[eva$Median.household.income.inflation.adj.to.2019=="$75,000+"]<-"$75,000+"
+
+eva$stage[eva$stage=="Localized" |eva$stage=="Localized only"]<-"1Localized"
+eva$stage[eva$stage=="Regional" | eva$stage=="Regional by both direct extension and lymph node involvement"
+        | eva$stage=="Regional by direct extension only"|eva$stage=="Regional lymph nodes involved only"]<-"2Regional"
+eva$stage[eva$stage=="Distant" | eva$stage=="Distant site(s)/node(s) involved"]<-"3Distant"
+eva$met=ifelse(eva$stage=="3Distant",1,0)
+eva$surg_pri[eva$Site.specific.surgery..1973.1997.varying.detail.by.year.and.site.==0
+           |eva$Site.specific.surgery..1973.1997.varying.detail.by.year.and.site.==2
+           |eva$RX.Summ..Surg.Prim.Site..1998..==0]<-0
+eva$surg_pri[is.na(eva$surg_pri)]<-1 
+eva$site1[(eva$Primary.Site>=0 & eva$Primary.Site<=79) 
+        | (eva$Primary.Site>=300 & eva$Primary.Site<=310)
+        | eva$Primary.Site==410 | eva$Primary.Site==411 
+        | (eva$Primary.Site>=442 & eva$Primary.Site<=444)
+        | eva$Primary.Site==490]<-"1Head"
+eva$site1[(eva$Primary.Site>=400 & eva$Primary.Site<=403)
+        |(eva$Primary.Site>=446 &eva$Primary.Site<=472)
+        |eva$Primary.Site==491 | eva$Primary.Site==492]<-"2Extremity"
+eva$site1[eva$Primary.Site==445
+        |(eva$Primary.Site>=493 & eva$Primary.Site<=495)
+        |eva$Primary.Site==496|eva$Primary.Site==498|eva$Primary.Site==499
+        |(eva$Primary.Site>=502 & eva$Primary.Site<=509)]<-"3Trunk"
+eva$site1[(eva$Primary.Site>=153 & eva$Primary.Site<=160)
+        |(eva$Primary.Site>=342 & eva$Primary.Site<=384)
+        |eva$Primary.Site==414|eva$Primary.Site==473
+        |(eva$Primary.Site>=161 & eva$Primary.Site<=241)
+        |eva$Primary.Site==480
+        |(eva$Primary.Site>=541 & eva$Primary.Site<=569)
+        |(eva$Primary.Site>=649 & eva$Primary.Site<=676)
+        |eva$Primary.Site==510|eva$Primary.Site==519
+        |eva$Primary.Site==601|eva$Primary.Site==609|eva$Primary.Site==632]<-"4T/Ab/Pv"
+table(is.na(eva$site1),eva$Primary.Site...labeled)
+table(eva$site1)
+eva$size<-as.numeric(eva$size)
+eva$size5[eva$size<=50]<- "<=5cm"
+eva$size5[eva$size>50]<- ">5cm"
+
+# External validation using eva cohort （只看C-index即可）
+## OS
+f<-cph(Surv(Survival.months,status==1)~Age+site1+size5+grade1+stage+surg_pri,
+       x=T,y=T,data=eva,surv=T)
+pre1<-predict(f,newdata = eva)
+f1<-cph(Surv(Survival.months,status==1)~pre1,x=T,y=T,data=eva,surv=T)
+validate(f1,method="boot",B=1000,dxy=T)
+rcorrcens(Surv(Survival.months,status==1)~pre1,data=eva)
+
+
+
+# Training and validation cohort making
+set.seed(405)
+train<-sample_n(s, 331)
+valid<-anti_join(s,train)
+
+
+#中位生存时间
+s$met=ifelse(s$stage=="1Localized",0,1)
+surv<-survfit(Surv(s$Survival.months,status)~1,data=s)
+surv;summary(surv)
+surv<-survfit(Surv(s$Survival.months,status)~met,data=s)
+surv;summary(surv)
+table(s$met)
+
+# Table 1 for training and validation subset making
+s$surg_pri=as.factor(s$surg_pri)
+table1(~Age+Sex+Race+Marriage+site1+size5+grade+stage+node1+radio+chemo+surg_pri,data=train)
+table1(~Age+Sex+Race+Marriage+site1+size5+grade+stage+node1+radio+chemo+surg_pri,data=valid)    
+table1(~Age+Sex+Race+Marriage+site1+size5+grade+stage+node1+radio+chemo+surg_pri,data=s)  
+eva$surg_pri=as.factor(eva$surg_pri)
+table1(~Age+Sex+Race+Marriage+site1+size5+grade+stage+radio+chemo+surg_pri,data=eva) 
+
+table<-matrix(c(47,284,30,136),nrow=2,ncol=2);table
+chisq.test(table)
+fisher.test(table)
+t.test(train$Age,valid$Age)
+
+# table<- all %>%
+#         transmute(白细胞,血红蛋白.g.L.,血小板,中性粒细胞计数,淋巴细胞计数,
+#                   白蛋白,基线碱性磷酸酶,基线肌酐,总胆红素,血钙,
+#                   基线INR,PLR,NLR,group)
+# table %>% tbl_summary(by=group,
+#                       statistic=list(all_continuous()~"{mean} ({sd})"),
+#                       digits=list(all_continuous()~2)) %>% 
+#         add_p(test = all_continuous() ~ "t.test",
+#               pvalue_fun = ~style_pvalue(.x, digits = 3))
+
+
+#Cox in training cohort to choose factors
+#Univariate analysis
+cox<-coxph(Surv(Survival.months,status)~stage,data=train) #All in
+summary(cox); a<-summary(cox)
+
+##OS: Full model
+cox<-coxph(Surv(Survival.months,status)~Age+site1+size5+grade1+node1+stage
+           +chemo+surg_pri,data=train) #没有加入Year,income,Marriage
+summary(cox); a<-summary(cox)
+cox_dta1=data.frame(a$conf.int);cox_dta1
+write.table(cox_dta1, "clipboard", sep="\t", row.names=TRUE) #然后粘贴到excel里
+cox_dta2=data.frame(a$coefficients);cox_dta2
+write.table(cox_dta2, "clipboard", sep="\t", row.names=TRUE)
+
+##OS: AIC-based model
+cox_step=step(cox,direction="backward")
+summary(cox_step); a<-summary(cox_step)
+cox_dta1=data.frame(a$conf.int);cox_dta1
+write.table(cox_dta1, "clipboard", sep="\t", row.names=TRUE) #然后粘贴到excel里
+cox_dta2=data.frame(a$coefficients);cox_dta2
+write.table(cox_dta2, "clipboard", sep="\t", row.names=TRUE)
+
+##CSS: Full model
+cox<-coxph(Surv(Survival.months,CSS)~Age+site1+size5+grade1+stage
+           +chemo+surg_pri,data=train) #没有加入Year,income,Marriage
+summary(cox); a<-summary(cox)
+cox_dta1=data.frame(a$conf.int);cox_dta1
+write.table(cox_dta1, "clipboard", sep="\t", row.names=TRUE) #然后粘贴到excel里
+cox_dta2=data.frame(a$coefficients);cox_dta2
+write.table(cox_dta2, "clipboard", sep="\t", row.names=TRUE)
+
+##CSS: AIC-based model
+cox_step=step(cox,direction="backward")
+summary(cox_step); a<-summary(cox_step)
+cox_dta1=data.frame(a$conf.int);cox_dta1
+write.table(cox_dta1, "clipboard", sep="\t", row.names=TRUE) #然后粘贴到excel里
+cox_dta2=data.frame(a$coefficients);cox_dta2
+write.table(cox_dta2, "clipboard", sep="\t", row.names=TRUE)
+
+# Nomogram construction: OS
+train$Age.recode.with.single.ages.and.100.<-NULL
+valid$Age.recode.with.single.ages.and.100.<-NULL
+#更改变量标签名字，便于绘图
+label(train$site1)<-"Tumor site"; label(train$size5)<-"Tumor size"; label(train$grade1)<-"Grade"
+label(train$stage)<-"SEER stage"; label(train$surg_pri)<-"Primary site surgery"
+nomo<-datadist(train)
+options(datadist='nomo')
+nomo3<-cph(Surv(Survival.months,status==1)~Age+site1+size5+grade1+stage+surg_pri,
+                x=T,y=T,data=train,surv=T,time.inc = 1);nomo3
+Cindex<-rcorrcens(Surv(as.numeric(train$Survival.months),train$status==1)~predict(nomo3))
+Cindex #C-index=aDxy/2+0.5; upper 95% CI=Cindex+SD, lower 95% CI=Cindex-SD
+
+surv<-Survival(nomo3)
+surv1<-function(x)surv(1*36,lp=x)
+surv2<-function(x)surv(1*60,lp=x)
+
+nomo_os<-nomogram(nomo3,
+                fun=list(surv1,surv2), #感兴趣的预测时间
+                vnames = c("labels"), #"names"为本来面目
+                funlabel=c('3-year OS probability',
+                           '5-year OS probability'), #预测时间段的名字
+                lp=T, #显示回归系数轴
+                maxscale=100,
+                fun.at = c('1.0','0.90','0.80','0.7','0.6','0.5','0.4','0.3','0.2','0.1'))
+plot(nomo_os)
+nomo_os
+formula_lp(nomogram=nomo_os) #揭示total points和linear predictor的关系
+nomogramEx(nomo=nomo_os,np=2,digit=9) #显示survival pro的计算公式，np为生存时间点个数
+
+
+# Nomogram construction: CSS
+train$Age.recode.with.single.ages.and.100.<-NULL
+valid$Age.recode.with.single.ages.and.100.<-NULL
+#更改变量标签名字，便于绘图
+label(train$site1)<-"Tumor site"; label(train$size5)<-"Tumor size"; label(train$grade1)<-"Grade"
+label(train$stage)<-"SEER stage"; label(train$surg_pri)<-"Primary site surgery"
+nomo<-datadist(train)
+options(datadist='nomo')
+nomo3<-cph(Surv(Survival.months,CSS==1)~Age+site1+size5+grade1+stage+surg_pri,
+           x=T,y=T,data=train,surv=T,time.inc = 1);nomo3
+Cindex<-rcorrcens(Surv(as.numeric(train$Survival.months),train$CSS==1)~predict(nomo3))
+Cindex #C-index=aDxy/2+0.5; upper 95% CI=Cindex+SD, lower 95% CI=Cindex-SD
+
+surv<-Survival(nomo3)
+surv1<-function(x)surv(1*36,lp=x)
+surv2<-function(x)surv(1*60,lp=x)
+
+nomo_css<-nomogram(nomo3,
+                fun=list(surv1,surv2), #感兴趣的预测时间
+                vnames = c("labels"), #"names"为本来面目
+                funlabel=c('3-year CSS probability',
+                           '5-year CSS probability'), #预测时间段的名字
+                lp=T, #显示回归系数轴
+                maxscale=100,
+                fun.at = c('1.0','0.90','0.80','0.7','0.6','0.5','0.4','0.3','0.2','0.1'))
+plot(nomo_css)
+nomo_css
+formula_lp(nomogram=nomo_css) #揭示total points和linear predictor的关系
+nomogramEx(nomo=nomo_css,np=2,digit=9) #显示survival pro的计算公式，np为生存时间点个数
+
+# Validation using valid cohort （只看C-index即可）
+## OS
+f<-cph(Surv(Survival.months,status==1)~Age+site1+size5+grade1+stage+surg_pri,
+           x=T,y=T,data=train,surv=T)
+pre1<-predict(f,newdata = valid)
+f1<-cph(Surv(Survival.months,status==1)~pre1,x=T,y=T,data=valid,surv=T)
+validate(f1,method="boot",B=1000,dxy=T)
+rcorrcens(Surv(Survival.months,status==1)~pre1,data=valid)
+
+# External validation using eva cohort （只看C-index即可）
+## OS
+f<-cph(Surv(Survival.months,status==1)~Age+site1+size5+grade1+stage+surg_pri,
+       x=T,y=T,data=eva,surv=T)
+pre1<-predict(f,newdata = eva)
+f1<-cph(Surv(Survival.months,status==1)~pre1,x=T,y=T,data=eva,surv=T)
+validate(f1,method="boot",B=1000,dxy=T)
+rcorrcens(Surv(Survival.months,status==1)~pre1,data=eva)
+
+
+# Nomo and SEERstage ROC and AUC in train cohort
+f<-cph(Surv(Survival.months,status==1)~Age+site1+size5+grade1+stage+surg_pri,
+       x=T,y=T,data=train,surv=T)
+train$pre1<-predict(f,newdata = train)
+roc1 <- timeROC(T=train$Survival.months, delta=train$status,
+               marker=train$pre1, 
+               cause=1, #1为结局事件
+               weighting="marginal", #KM模型，"cox"为Cox模型，cox无法计算AUC
+               times=c(12*1, 12*3, 12*5), #想计算的时间点
+               iid=T) #保存置信区间
+roc1 #查看结果
+train$SEERstage[train$stage=="1Localized"]<-1
+train$SEERstage[train$stage=="2Regional"]<-2
+train$SEERstage[train$stage=="3Distant"]<-3
+roc2 <- timeROC(T=train$Survival.months, delta=train$status,
+               marker=train$SEERstage, 
+               cause=1, #1为结局事件
+               weighting="marginal", #KM模型，"cox"为Cox模型，cox无法计算AUC
+               times=c(12*1, 12*3, 12*5), #想计算的时间点
+               iid=T) #保存置信区间
+roc2 #查看结果
+plot(roc$FP,roc$TP,type="l",col="white",lty=1,xlab = "False Positive",ylab="True Positive",lwd=2)
+plot(roc1, time=12*3, add=T, col="red",xlab = "False Positive",ylab="True Positive",lwd=2)
+plot(roc2, time=12*3, add=T, col="blue",lwd=2)
+legend ("bottomright",
+        c("Nomogram" , "SEER stage"),
+        col=c("red", "blue"), lty=1, lwd=2)
+plot(roc$FP,roc$TP,type="l",col="white",lty=1,xlab = "False Positive",ylab="True Positive",lwd=2)
+plot(roc1, time=12*5, add=T, col="red",xlab = "False Positive",ylab="True Positive",lwd=2)
+plot(roc2, time=12*5, add=T, col="blue",lwd=2)
+legend ("bottomright",
+        c("Nomogram" , "SEER stage"),
+        col=c("red", "blue"), lty=1, lwd=2)
+
+# Nomo and SEERstage ROC and AUC in valid cohort
+f<-cph(Surv(Survival.months,status==1)~Age+site1+size5+grade1+stage+surg_pri,
+       x=T,y=T,data=train,surv=T)
+valid$pre1<-predict(f,newdata = valid)
+roc1 <- timeROC(T=valid$Survival.months, delta=valid$status,
+                marker=valid$pre1, 
+                cause=1, #1为结局事件
+                weighting="marginal", #KM模型，"cox"为Cox模型，cox无法计算AUC
+                times=c(12*1, 12*3, 12*5), #想计算的时间点
+                iid=T) #保存置信区间
+roc1 #查看结果
+valid$SEERstage[valid$stage=="1Localized"]<-1
+valid$SEERstage[valid$stage=="2Regional"]<-2
+valid$SEERstage[valid$stage=="3Distant"]<-3
+roc2 <- timeROC(T=valid$Survival.months, delta=valid$status,
+                marker=valid$SEERstage, 
+                cause=1, #1为结局事件
+                weighting="marginal", #KM模型，"cox"为Cox模型，cox无法计算AUC
+                times=c(12*1, 12*3, 12*5), #想计算的时间点
+                iid=T) #保存置信区间
+roc2 #查看结果
+plot(roc$FP,roc$TP,type="l",col="white",lty=1,xlab = "False Positive",ylab="True Positive",lwd=2)
+plot(roc1, time=12*3, add=T, col="red",xlab = "False Positive",ylab="True Positive",lwd=2)
+plot(roc2, time=12*3, add=T, col="blue",lwd=2)
+legend ("bottomright",
+        c("Nomogram" , "SEER stage"),
+        col=c("red", "blue"), lty=1, lwd=2)
+plot(roc$FP,roc$TP,type="l",col="white",lty=1,xlab = "False Positive",ylab="True Positive",lwd=2)
+plot(roc1, time=12*5, add=T, col="red",xlab = "False Positive",ylab="True Positive",lwd=2)
+plot(roc2, time=12*5, add=T, col="blue",lwd=2)
+legend ("bottomright",
+        c("Nomogram" , "SEER stage"),
+        col=c("red", "blue"), lty=1, lwd=2)
+
+# Nomo and SEERstage ROC and AUC in external valid cohort
+f<-cph(Surv(Survival.months,status==1)~Age+site1+size5+grade1+stage+surg_pri,
+       x=T,y=T,data=train,surv=T)
+eva$pre1<-predict(f,newdata = eva)
+roc1 <- timeROC(T=eva$Survival.months, delta=eva$status,
+                marker=eva$pre1, 
+                cause=1, #1为结局事件
+                weighting="marginal", #KM模型，"cox"为Cox模型，cox无法计算AUC
+                times=c(12*1, 12*3, 12*5), #想计算的时间点
+                iid=T) #保存置信区间
+roc1 #查看结果
+eva$SEERstage[eva$stage=="1Localized"]<-1
+eva$SEERstage[eva$stage=="2Regional"]<-2
+eva$SEERstage[eva$stage=="3Distant"]<-3
+roc2 <- timeROC(T=eva$Survival.months, delta=eva$status,
+                marker=eva$SEERstage, 
+                cause=1, #1为结局事件
+                weighting="marginal", #KM模型，"cox"为Cox模型，cox无法计算AUC
+                times=c(12*1, 12*3, 12*5), #想计算的时间点
+                iid=T) #保存置信区间
+roc2 #查看结果
+plot(roc$FP,roc$TP,type="l",col="white",lty=1,xlab = "False Positive",ylab="True Positive",lwd=2)
+plot(roc1, time=12*3, add=T, col="red",xlab = "False Positive",ylab="True Positive",lwd=2)
+plot(roc2, time=12*3, add=T, col="blue",lwd=2)
+legend ("bottomright",
+        c("Nomogram" , "SEER stage"),
+        col=c("red", "blue"), lty=1, lwd=2)
+plot(roc$FP,roc$TP,type="l",col="white",lty=1,xlab = "False Positive",ylab="True Positive",lwd=2)
+plot(roc1, time=12*5, add=T, col="red",xlab = "False Positive",ylab="True Positive",lwd=2)
+plot(roc2, time=12*5, add=T, col="blue",lwd=2)
+legend ("bottomright",
+        c("Nomogram" , "SEER stage"),
+        col=c("red", "blue"), lty=1, lwd=2)
+
+
+
+
+
+
+
+
+# ROC and AUC in valid cohort: OS
+f<-cph(Surv(Survival.months,status==1)~Age+site1+size5+grade1+stage+surg_pri,
+       x=T,y=T,data=train,surv=T) #模型是根据train组建立的
+valid$pre1<-predict(f,newdata = valid)
+roc <- timeROC(T=valid$Survival.months, delta=valid$status,
+               marker=valid$pre1, 
+               cause=1, #1为结局事件
+               weighting="marginal", #KM模型，"cox"为Cox模型，cox无法计算AUC
+               times=c(12*1, 12*3, 12*5), #想计算的时间点
+               iid=T) #保存置信区间
+roc #查看结果
+plot(roc$FP,roc$TP,type="l",col="white",lty=1,xlab = "False Positive",ylab="True Positive",lwd=2)
+plot(roc, time=12*3, add=T, col="red",xlab = "False Positive",ylab="True Positive",lwd=2)
+plot(roc, time=12*5, add=T, col="blue",lwd=2)
+legend ("bottomright",
+        c("3-year OS" , "5-year OS"),
+        col=c("red", "blue"), lty=1, lwd=2)
+
+# ROC and AUC in eva cohort: OS
+f<-cph(Surv(Survival.months,status==1)~Age+site1+size5+grade1+stage+surg_pri,
+       x=T,y=T,data=eva,surv=T) #模型是根据train组建立的
+eva$pre1<-predict(f,newdata = eva)
+roc <- timeROC(T=eva$Survival.months, delta=eva$status,
+               marker=eva$pre1, 
+               cause=1, #1为结局事件
+               weighting="marginal", #KM模型，"cox"为Cox模型，cox无法计算AUC
+               times=c(12*1, 12*3, 12*5), #想计算的时间点
+               iid=T) #保存置信区间
+roc #查看结果
+plot(roc$FP,roc$TP,type="l",col="white",lty=1,xlab = "False Positive",ylab="True Positive",lwd=2)
+plot(roc, time=12*3, add=T, col="red",xlab = "False Positive",ylab="True Positive",lwd=2)
+plot(roc, time=12*5, add=T, col="blue",lwd=2)
+legend ("bottomright",
+        c("3-year OS" , "5-year OS"),
+        col=c("red", "blue"), lty=1, lwd=2)
+
+
+
+# Calibration curve: 3 year OS
+## Internal validation
+attach(train)
+nomo<-datadist(train)
+options(datadist='nomo')
+nomo1<-cph(Surv(Survival.months,status==1)~Age+site1+size5+grade1+stage+surg_pri,
+           x=T,y=T,data=train,surv=T,time.inc = 36)
+cal1<-calibrate(nomo1, cmethod='KM',
+                method="boot", 
+                u=36, #需与模型中time.int一致
+                m=80, #约等于样本量除以3，需不断调试
+                B=1000) #bootstrap次数
+# par(mar=c(5,4,4,3), cex=1) #图框参数，可不用
+plot(cal1,lwd=1,lty=1,errbar.col="blue",xlim=c(0,1),ylim=c(0,1),
+     xlab="Predicted Probability of 3-year Survival",
+     ylab="Observed Probability of 3-year Survival",
+     col="red",
+     subtitles=F)
+
+## Internal validation
+train$pre1<-predict(f,newdata = train)
+valid$pre1<-predict(f,newdata = valid)
+attach(valid)
+nomo<-datadist(valid)
+options(datadist='nomo')
+fit<-cph(Surv(Survival.months,status==1)~pre1, #这是外部验证的精髓，先相对于nomo得分（和lp线性相关）构建方程
+           x=T,y=T,data=valid,surv=T,time.inc = 36)
+cal1<-calibrate(fit, cmethod='KM',
+                method="boot", 
+                u=36, #需与模型中time.int一致
+                m=40, #约等于样本量除以3，需不断调试
+                B=1000) #bootstrap次数
+# par(mar=c(5,4,4,3), cex=1) #图框参数，可不用
+plot(cal1,lwd=1,lty=1,errbar.col="blue",xlim=c(0,1),ylim=c(0,1),
+     xlab="Predicted Probability of 3-year Survival",
+     ylab="Observed Probability of 3-year Survival",
+     col="red",
+     subtitles=F)
+
+
+## External validation
+eva$pre1<-predict(f,newdata = eva)
+attach(eva)
+nomo<-datadist(eva)
+options(datadist='nomo')
+fit<-cph(Surv(Survival.months,status==1)~pre1, #这是外部验证的精髓，先相对于nomo得分（和lp线性相关）构建方程
+         x=T,y=T,data=eva,surv=T,time.inc = 36)
+cal1<-calibrate(fit, cmethod='KM',
+                method="boot", 
+                u=36, #需与模型中time.int一致
+                m=7, #约等于样本量除以3，需不断调试
+                B=1000) #bootstrap次数
+# par(mar=c(5,4,4,3), cex=1) #图框参数，可不用
+plot(cal1,lwd=1,lty=1,errbar.col="blue",xlim=c(0,1),ylim=c(0,1),
+     xlab="Predicted Probability of 3-year Survival",
+     ylab="Observed Probability of 3-year Survival",
+     col="red",
+     subtitles=F)
+
+# Calibration curve: 5 year OS
+## Internal validation
+attach(train)
+nomo<-datadist(train)
+options(datadist='nomo')
+nomo1<-cph(Surv(Survival.months,status==1)~Age+site1+size5+grade1+stage+surg_pri,
+           x=T,y=T,data=train,surv=T,time.inc = 60)
+cal1<-calibrate(nomo1, cmethod='KM',
+                method="boot", 
+                u=60, #需与模型中time.int一致
+                m=80, #约等于样本量除以3，需不断调试
+                B=1000) #bootstrap次数
+# par(mar=c(5,4,4,3), cex=1) #图框参数，可不用
+plot(cal1,lwd=1,lty=1,errbar.col="blue",xlim=c(0,1),ylim=c(0,1),
+     xlab="Predicted Probability of 5-year Survival",
+     ylab="Observed Probability of 5-year Survival",
+     col="red",
+     subtitles=F)
+
+## Internal validation
+train$pre1<-predict(f,newdata = train)
+valid$pre1<-predict(f,newdata = valid)
+attach(valid)
+nomo<-datadist(valid)
+options(datadist='nomo')
+fit<-cph(Surv(Survival.months,status==1)~pre1, #这是外部验证的精髓，先相对于nomo得分（和lp线性相关）构建方程
+         x=T,y=T,data=valid,surv=T,time.inc = 60)
+cal1<-calibrate(fit, cmethod='KM',
+                method="boot", 
+                u=60, #需与模型中time.int一致
+                m=40, #约等于样本量除以3，需不断调试
+                B=1000) #bootstrap次数
+# par(mar=c(5,4,4,3), cex=1) #图框参数，可不用
+plot(cal1,lwd=1,lty=1,errbar.col="blue",xlim=c(0,1),ylim=c(0,1),
+     xlab="Predicted Probability of 5-year Survival",
+     ylab="Observed Probability of 5-year Survival",
+     col="red",
+     subtitles=F)
+
+## External validation
+eva$pre1<-predict(f,newdata = eva)
+attach(eva)
+nomo<-datadist(eva)
+options(datadist='nomo')
+fit<-cph(Surv(Survival.months,status==1)~pre1, #这是外部验证的精髓，先相对于nomo得分（和lp线性相关）构建方程
+         x=T,y=T,data=eva,surv=T,time.inc = 60)
+cal1<-calibrate(fit, cmethod='KM',
+                method="boot", 
+                u=60, #需与模型中time.int一致
+                m=6, #约等于样本量除以3，需不断调试
+                B=1000) #bootstrap次数
+# par(mar=c(5,4,4,3), cex=1) #图框参数，可不用
+plot(cal1,lwd=1,lty=1,errbar.col="blue",xlim=c(0.4,1),ylim=c(0,1),
+     xlab="Predicted Probability of 5-year Survival",
+     ylab="Observed Probability of 5-year Survival",
+     col="red",
+     subtitles=F)
+
+#计算AUC
+library(nomogramFormula)
+# table(s$status,s$Survival.months)
+# s$surv_3y=ifelse(s$Survival.months>=36,1,0)
+# s$surv_5y=ifelse(s$Survival.months>=60,1,0)
+# f <- cph(Surv(Survival.months,status==1)~surg_pri+Age+site1+stage+grade1,data=train,
+#          linear.predictors=TRUE,surv=TRUE)
+# head(prob_cal(reg = f,times = c(36,60)))
+# pr<-prob_cal(reg = f,times = c(36,60))
+# pr
+# 
+# s$nomo_pr36<-pr$P36
+# s$nomo_pr60<-pr$P60
+# rocnomo_36<-roc(s$surv_3y, s$nomo_pr36, direction="<",smooth=TRUE,ci=T,auc = T)
+# auc(rocnomo_36); ci(auc(rocnomo_36))
+# rocnomo_60<-roc(s$surv_5y, s$nomo_pr60, direction="<",smooth=TRUE,ci=T,auc = T)
+# auc(rocnomo_60); ci(auc(rocnomo_60))  
+
+# DCA曲线绘制
+library(dcurves)
+#先提取cox模型中对3年生存的预测
+coxmod=coxph(Surv(Survival.months,status)~surg_pri+Age+site1+stage+grade1,data=train)
+train$pr_3y=c(1- (summary(survfit(coxmod, newdata=train), times=36)$surv))
+valid$pr_3y=c(1- (summary(survfit(coxmod, newdata=valid), times=36)$surv))
+eva$pr_3y=c(1- (summary(survfit(coxmod, newdata=eva), times=36)$surv))
+train$pr_5y=c(1- (summary(survfit(coxmod, newdata=train), times=60)$surv))
+valid$pr_5y=c(1- (summary(survfit(coxmod, newdata=valid), times=60)$surv))
+eva$pr_5y=c(1- (summary(survfit(coxmod, newdata=eva), times=60)$surv))
+
+##DCA: 3y OS training cohort
+d<-dca(Surv(Survival.months,status)~ pr_3y, data=train, time=36, 
+       thresholds=0:100/100) %>% plot(smooth=T)
+d+scale_color_manual(labels = c("All", "None","Nomogram"),values=c("red", "blue","darkgreen"))+
+        scale_x_continuous(limits = c(0,1)) #不加这行横坐标默认为%
+##DCA: 5y OS training cohort
+d<-dca(Surv(Survival.months,status)~ pr_5y, data=train, time=60, 
+       thresholds=1:100/100) %>% plot(smooth=T)
+d+scale_color_manual(labels = c("All", "None","Nomogram"),values=c("red", "blue","darkgreen"))+
+        scale_x_continuous(limits = c(0,1))
+##DCA: 3y OS valid cohort
+d<-dca(Surv(Survival.months,status)~ pr_3y, data=valid, time=36, 
+       thresholds=1:100/100) %>% plot(smooth=T)
+d+scale_color_manual(labels = c("All", "None","Nomogram"),values=c("red", "blue","darkgreen"))+
+        scale_x_continuous(limits = c(0,1))
+##DCA: 5y OS training cohort
+d<-dca(Surv(Survival.months,status)~ pr_5y, data=valid, time=60, 
+       thresholds=1:100/100) %>% plot(smooth=T)
+d+scale_color_manual(labels = c("All", "None","Nomogram"),values=c("red", "blue","darkgreen"))+
+        scale_x_continuous(limits = c(0,1))
+##DCA: 3y OS eva cohort
+d<-dca(Surv(Survival.months,status)~ pr_3y, data=eva, time=36, 
+       thresholds=1:100/100) %>% plot(smooth=T)
+d+scale_color_manual(labels = c("All", "None","Nomogram"),values=c("red", "blue","darkgreen"))+
+        scale_x_continuous(limits = c(0,1))
+##DCA: 5y OS eva cohort
+d<-dca(Surv(Survival.months,status)~ pr_5y, data=eva, time=60, 
+       thresholds=1:100/100) %>% plot(smooth=T)
+d+scale_color_manual(labels = c("All", "None","Nomogram"),values=c("red", "blue","darkgreen"))+
+        scale_x_continuous(limits = c(0,1))
+
+
+#危险度分层，绘制KM曲线
+##获取train组得分，求中位数作为cutoff
+f<-cph(Surv(Survival.months,status==1)~Age+site1+size5+grade1+stage+surg_pri,
+       x=T,y=T,data=train,surv=T)
+train$pre1<-predict(f,newdata = train)
+valid$pre1<-predict(f,newdata = valid)
+s$pre1<-predict(f,newdata = s)
+median(train$pre1) #-0.09585078
+print(160.7822-68.8091*0.09585078) #对应的total points的cutoff point 
+#log-rank法取最佳cutoff
+cutoff<-surv_cutpoint(s,time="Survival.months",event="status",
+                      variables=c("pre1"))
+summary(cutoff)
+print(160.7822+68.8091*0.3456325) #对应的total points的cutoff point 
+
+## KM_risk_os_train
+train$risk_os154=ifelse(train$pre1<=-0.096,"1low","2high")
+fit<-survfit(Surv(Survival.months,status)~risk_os154,data=train) #基于分组绘制生存曲线
+ggsurvplot(fit, data = train,
+           palette = "lancet", #风格，也可以单独定曲线颜色，如“red”，“green”，“blue”设定
+           break.x.by = 30, 
+           xlab="Survival in months", ylab="Overall survival",
+           conf.int = F, # 显示置信区间
+           axes.offset=FALSE, font.xtickslab = c(14),font.ytickslab = c(14),
+           legend="top",
+           legend.labs = c("low-risk group","high-risk group"),title=NULL)
+cox<-coxph(Surv(Survival.months,status)~risk_os154,data=train) #求低危vs高危组HR
+summary(cox); a<-summary(cox)
+
+train$risk_os185=ifelse(train$pre1<=0.3456325,"1low","2high")
+fit<-survfit(Surv(Survival.months,status)~risk_os185,data=train) #基于分组绘制生存曲线
+ggsurvplot(fit, data = train,
+           palette = "lancet", #风格，也可以单独定曲线颜色，如“red”，“green”，“blue”设定
+           break.x.by = 30, 
+           xlab="Survival in months", ylab="Overall survival",
+           conf.int = F, # 显示置信区间
+           axes.offset=FALSE, font.xtickslab = c(14),font.ytickslab = c(14),
+           legend="top",
+           legend.labs = c("low-risk group","high-risk group"),title=NULL)
+cox<-coxph(Surv(Survival.months,status)~risk_os185,data=train) #求低危vs高危组HR
+summary(cox); a<-summary(cox)
+table(train$risk_os185)
+
+
+## KM_risk_os_valid
+valid$risk_os=ifelse(valid$pre1<=-0.096,"1low","2high") #根据train cohort求得的cutoff值对valid cohort进行危险度分组
+fit<-survfit(Surv(Survival.months,status)~risk_os,data=valid) #基于分组绘制生存曲线
+ggsurvplot(fit, data = valid,
+           palette = "lancet", #风格，也可以单独定曲线颜色，如“red”，“green”，“blue”设定
+           break.x.by = 30, 
+           xlab="Survival in months", ylab="Overall survival",
+           conf.int = F, # 显示置信区间
+           axes.offset=FALSE, font.xtickslab = c(14),font.ytickslab = c(14),
+           legend="top",
+           legend.labs = c("low-risk group","high-risk group"),title=NULL)
+cox<-coxph(Surv(Survival.months,status)~risk_os,data=valid) #求低危vs高危组HR
+summary(cox); a<-summary(cox)
+
+valid$risk_os185=ifelse(valid$pre1<=0.3456325,"1low","2high")
+fit<-survfit(Surv(Survival.months,status)~risk_os185,data=valid) #基于分组绘制生存曲线
+ggsurvplot(fit, data = valid,
+           palette = "lancet", #风格，也可以单独定曲线颜色，如“red”，“green”，“blue”设定
+           break.x.by = 30, 
+           xlab="Survival in months", ylab="Overall survival",
+           conf.int = F, # 显示置信区间
+           axes.offset=FALSE, font.xtickslab = c(14),font.ytickslab = c(14),
+           legend="top",
+           legend.labs = c("low-risk group","high-risk group"),title=NULL)
+cox<-coxph(Surv(Survival.months,status)~risk_os185,data=valid) #求低危vs高危组HR
+summary(cox); a<-summary(cox)
+table(valid$risk_os185)
+
+## KM_risk_os_eva
+eva$risk_os=ifelse(eva$pre1<=-0.096,"1low","2high") #根据train cohort求得的cutoff值对eva cohort进行危险度分组
+fit<-survfit(Surv(Survival.months,status)~risk_os,data=eva) #基于分组绘制生存曲线
+ggsurvplot(fit, data = eva,
+           palette = "lancet", #风格，也可以单独定曲线颜色，如“red”，“green”，“blue”设定
+           break.x.by = 30, 
+           xlab="Survival in months", ylab="Overall survival",
+           conf.int = F, # 显示置信区间
+           axes.offset=FALSE, font.xtickslab = c(14),font.ytickslab = c(14),
+           legend="top",
+           legend.labs = c("low-risk group","high-risk group"),title=NULL)
+cox<-coxph(Surv(Survival.months,status)~risk_os,data=eva) #求低危vs高危组HR
+summary(cox); a<-summary(cox)
+
+valid$risk_os185=ifelse(valid$pre1<=0.3456325,"1low","2high")
+fit<-survfit(Surv(Survival.months,status)~risk_os185,data=valid) #基于分组绘制生存曲线
+ggsurvplot(fit, data = valid,
+           palette = "lancet", #风格，也可以单独定曲线颜色，如“red”，“green”，“blue”设定
+           break.x.by = 30, 
+           xlab="Survival in months", ylab="Overall survival",
+           conf.int = F, # 显示置信区间
+           axes.offset=FALSE, font.xtickslab = c(14),font.ytickslab = c(14),
+           legend="top",
+           legend.labs = c("low-risk group","high-risk group"),title=NULL)
+cox<-coxph(Surv(Survival.months,status)~risk_os185,data=valid) #求低危vs高危组HR
+summary(cox); a<-summary(cox)
+table(valid$risk_os185)
+
+
+#比较以OS的nomo分组，low-risk和high-risk的受限生存时间
+library(survRM2)
+train$arm=ifelse(train$risk_os=="1low",1,0) #rmst2()中arm参数只能取0和1
+rms <- rmst2(train$Survival.months,train$status,train$arm, tau=60)
+rms; plot(rms)
+valid$arm=ifelse(valid$risk_os=="1low",1,0) #rmst2()中arm参数只能取0和1
+rms <- rmst2(valid$Survival.months,valid$status,valid$arm, tau=60)
+rms; plot(rms)
+eva$arm=ifelse(eva$risk_os=="1low",1,0) #rmst2()中arm参数只能取0和1
+rms <- rmst2(valid$Survival.months,valid$status,valid$arm, tau=60)
+rms; plot(rms)
+
+#亚组分析：手术在转移的意义
+train_met<-filter(train,train$met==1); valid_met<-filter(valid,valid$met==1)
+cox<-coxph(Surv(Survival.months,status)~surg_pri,data=train_met)
+summary(cox); a<-summary(cox)
+fit<-survfit(Surv(Survival.months,status)~surg_pri,data=train_met);fit
+ggsurvplot(fit, data = train_met,
+           palette = "lancet", #风格，也可以单独定曲线颜色，如“red”，“green”，“blue”设定
+           break.x.by = 30, 
+           xlab="Survival in months", ylab="Overall survival",
+           conf.int = T, # 显示置信区间
+           axes.offset=FALSE, font.xtickslab = c(14),font.ytickslab = c(14),
+           legend="top",
+           legend.labs = c("No surgery","Surgery"),title=NULL)
+
+cox<-coxph(Surv(Survival.months,status)~surg_pri,data=valid_met)
+summary(cox); a<-summary(cox)
+fit<-survfit(Surv(Survival.months,status)~surg_pri,data=valid_met);fit
+ggsurvplot(fit, data = valid_met,
+           palette = "lancet", #风格，也可以单独定曲线颜色，如“red”，“green”，“blue”设定
+           break.x.by = 30, 
+           xlab="Survival in months", ylab="Overall survival",
+           conf.int = T, # 显示置信区间
+           axes.offset=FALSE, font.xtickslab = c(14),font.ytickslab = c(14),
+           legend="top",
+           legend.labs = c("No surgery","Surgery"),title=NULL)
+
+
+# 比较Nomogram和SEER stage的AUC
+rocSEER<-roc(train$surv_3m, test$TOM, direction=">",smooth=FALSE,ci=T,auc = T)
+auc(rocTOM);ci(auc(rocTOM)) 
